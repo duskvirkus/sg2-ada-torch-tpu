@@ -129,7 +129,7 @@ def training_loop(
     start_time = time.time()
     if num_tpus is not None:
         num_devices = num_tpus
-        torch.manual_seed(args.tpu_seed)
+        torch.manual_seed(tpu_seed)
         device = xm.xla_device()
     else:
         num_devices = num_gpus

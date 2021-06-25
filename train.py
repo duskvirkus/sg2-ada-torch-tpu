@@ -190,6 +190,7 @@ def setup_training_loop_kwargs(
         'paper1024':     dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=2,    ema=10,  ramp=None, map=8),
         'cifar':         dict(ref_gpus=2,  kimg=100000, mb=64, mbstd=32, fmaps=0.5, lrate=0.0025, gamma=0.01, ema=500, ramp=0.05, map=2),
         'cifarbaseline': dict(ref_gpus=2,  kimg=100000, mb=64, mbstd=32, fmaps=0.5, lrate=0.0025, gamma=0.01, ema=500, ramp=0.05, map=8),
+        'tpu-colab':     dict(ref_tpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=10,   ema=10,  ramp=None, map=8),
     }
 
     assert cfg in cfg_specs
@@ -224,7 +225,10 @@ def setup_training_loop_kwargs(
 
     args.total_kimg = spec.kimg
     args.batch_size = spec.mb
-    args.batch_gpu = spec.mb // spec.ref_gpus
+    if args.num_tpus is not None:
+        args.batch_gpu = spec.mb // spec.ref_tpus
+    else:
+        args.batch_gpu = spec.mb // spec.ref_gpus
     args.ema_kimg = spec.ema
     args.ema_rampup = spec.ramp
 
@@ -462,7 +466,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--mirrory', help='Augment dataset with y-flips (default: false)', type=bool, metavar='BOOL')
 
 # Base config.
-@click.option('--cfg', help='Base config [default: auto]', type=click.Choice(['auto', '11gb-gpu','11gb-gpu-complex', '24gb-gpu','24gb-gpu-complex', '48gb-gpu','48gb-2gpu', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar', 'cifarbaseline', 'aydao']))
+@click.option('--cfg', help='Base config [default: auto]', type=click.Choice(['auto', '11gb-gpu','11gb-gpu-complex', '24gb-gpu','24gb-gpu-complex', '48gb-gpu','48gb-2gpu', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar', 'cifarbaseline', 'aydao', 'tpu-colab']))
 @click.option('--lrate', help='Override learning rate', type=float, metavar='FLOAT')
 @click.option('--gamma', help='Override R1 gamma', type=float)
 @click.option('--kimg', help='Override training duration', type=int, metavar='INT')
@@ -582,7 +586,7 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     print('Launching processes...')
     with tempfile.TemporaryDirectory() as temp_dir:
         if args.num_tpus is not None:
-            args['tpu_seed'] = np.randint(0, 100000, dtype='int')
+            args['tpu_seed'] = np.random.randint(0, 100000, dtype='int')
             xmp.spawn(subprocess_fn, args=(args, temp_dir), nprocs=args.num_tpus, start_method='fork')
         else:
             torch.multiprocessing.set_start_method('spawn')
