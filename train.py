@@ -17,6 +17,7 @@ import tempfile
 import torch
 import dnnlib
 import numpy as np
+import torch_xla
 import torch_xla.distributed.xla_multiprocessing as xmp
 
 from training import training_loop
@@ -586,7 +587,9 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     print('Launching processes...')
     with tempfile.TemporaryDirectory() as temp_dir:
         if args.num_tpus is not None:
+            assert os.environ['COLAB_TPU_ADDR'], 'Make sure to select TPU from Edit > Notebook settings > Hardware accelerator'
             args['tpu_seed'] = np.random.randint(0, 100000, dtype='int')
+            args['tpu_num_workers'] = 8
             xmp.spawn(subprocess_fn, args=(args, temp_dir), nprocs=args.num_tpus, start_method='fork')
         else:
             torch.multiprocessing.set_start_method('spawn')

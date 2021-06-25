@@ -18,6 +18,8 @@ import torch
 import dnnlib
 import torch_xla
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.parallel_loader as pl
+import torch_xla.distributed.xla_multiprocessing as xmp
 
 from torch_utils import misc
 from torch_utils import training_stats
@@ -124,6 +126,7 @@ def training_loop(
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
     tpu_seed                = 1234,     # Seed to sync all tpu models.
+    tpu_num_workers         = 8         # Num workers for data loading with tpus.
 ):
     # Initialize.
     start_time = time.time()
@@ -131,6 +134,8 @@ def training_loop(
         num_devices = num_tpus
         torch.manual_seed(tpu_seed)
         device = xm.xla_device()
+        if not xm.is_master_ordinal():
+            print('TPUs: %s' % (torch_xla.core.xla_model.get_xla_supported_devices(devkind=None, max_devices=None)))
     else:
         num_devices = num_gpus
         device = torch.device('cuda', rank)
@@ -143,11 +148,36 @@ def training_loop(
         grid_sample_gradfix.enabled = True                  # Avoids errors with the augmentation pipe.
 
     # Load training set.
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0 or not xm.is_master_ordinal():
         print('Loading training set...')
+    
     training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
-    training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_devices, seed=random_seed)
-    training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_devices, **data_loader_kwargs))
+
+    if num_tpus is not None:
+        # on tpus
+        print('device: %s' % device)
+        # training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_devices, seed=random_seed)
+        # training_set_loader = pl.ParallelLoader(
+        #     torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_devices, **data_loader_kwargs),
+        #     torch_xla.core.xla_model.get_xla_supported_devices(devkind=None, max_devices=None)
+        # )
+
+        training_set_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset,
+            num_replicas=xm.xrt_world_size(),
+            rank=xm.get_ordinal(),
+            shuffle=True)
+        training_set_loader = torch.utils.data.DataLoader(
+            dataset=training_set,
+            batch_size=batch_size//num_devices,
+            sampler=training_set_sampler,
+            num_workers=tpu_num_workers,
+            drop_last=True)
+        para_train_loader = pl.ParallelLoader(training_set_loader, [device]).per_device_loader(device)
+    else:
+        # on gpu(s)
+        training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_devices, seed=random_seed)
+        training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_devices, **data_loader_kwargs))
     if rank == 0 or xm.is_master_ordinal():
         print()
         print('Num images: ', len(training_set))
@@ -159,8 +189,13 @@ def training_loop(
     if rank == 0 or xm.is_master_ordinal():
         print('Constructing networks...')
     common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution, img_channels=training_set.num_channels)
-    G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
-    D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+
+    if num_tpus is not None:
+        G = xmp.MpModelWrapper(dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False)).to(device) # subclass of torch.nn.Module
+        D = xmp.MpModelWrapper(dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False)).to(device) # subclass of torch.nn.Module
+    else:
+        G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+        D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
 
     # Resume from existing pickle.
@@ -198,6 +233,9 @@ def training_loop(
     for name, module in [('G_mapping', G.mapping), ('G_synthesis', G.synthesis), ('D', D), (None, G_ema), ('augment_pipe', augment_pipe)]:
         if (num_devices > 1) and (module is not None) and len(list(module.parameters())) != 0:
             module.requires_grad_(True)
+            # if num_tpus is not None:
+            #     module = torch_xla.distributed.parallel_loader.ParallelLoader(torch.nn.parallel.DistributedDataParallel(module, device_ids=[device], broadcast_buffers=False))
+            # else:
             module = torch.nn.parallel.DistributedDataParallel(module, device_ids=[device], broadcast_buffers=False)
             module.requires_grad_(False)
         if name is not None:
