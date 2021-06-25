@@ -134,8 +134,8 @@ def training_loop(
         num_devices = num_tpus
         torch.manual_seed(tpu_seed)
         device = xm.xla_device()
-        if not xm.is_master_ordinal():
-            print('TPUs: %s' % (torch_xla.core.xla_model.get_xla_supported_devices(devkind=None, max_devices=None)))
+        rank=xm.get_ordinal()
+        # print('TPU Index: %s' % xm.get_ordinal())
     else:
         num_devices = num_gpus
         device = torch.device('cuda', rank)
@@ -148,14 +148,13 @@ def training_loop(
         grid_sample_gradfix.enabled = True                  # Avoids errors with the augmentation pipe.
 
     # Load training set.
-    if rank == 0 or not xm.is_master_ordinal():
+    if rank == 0:
         print('Loading training set...')
     
     training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
 
     if num_tpus is not None:
         # on tpus
-        print('device: %s' % device)
         # training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_devices, seed=random_seed)
         # training_set_loader = pl.ParallelLoader(
         #     torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_devices, **data_loader_kwargs),
@@ -163,7 +162,7 @@ def training_loop(
         # )
 
         training_set_sampler = torch.utils.data.distributed.DistributedSampler(
-            train_dataset,
+            dataset=training_set,
             num_replicas=xm.xrt_world_size(),
             rank=xm.get_ordinal(),
             shuffle=True)
@@ -178,7 +177,7 @@ def training_loop(
         # on gpu(s)
         training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_devices, seed=random_seed)
         training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_devices, **data_loader_kwargs))
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0:
         print()
         print('Num images: ', len(training_set))
         print('Image shape:', training_set.image_shape)
@@ -186,7 +185,7 @@ def training_loop(
         print()
 
     # Construct networks.
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0:
         print('Constructing networks...')
     common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution, img_channels=training_set.num_channels)
 
@@ -214,7 +213,7 @@ def training_loop(
         misc.print_module_summary(D, [img, c])
 
     # Setup augmentation.
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0:
         print('Setting up augmentation...')
     augment_pipe = None
     ada_stats = None
@@ -226,9 +225,10 @@ def training_loop(
 
     # Distribute across GPUs.
     if rank == 0:
-        print(f'Distributing across {num_gpus} GPUs...')
-    if xm.is_master_ordinal():
-        print(f'Distributing across {num_tpus} GPUs...')
+        if num_tpus is not None:
+            print(f'Distributing across {num_tpus} TPUs...')
+        else:
+            print(f'Distributing across {num_gpus} GPUs...')
     ddp_modules = dict()
     for name, module in [('G_mapping', G.mapping), ('G_synthesis', G.synthesis), ('D', D), (None, G_ema), ('augment_pipe', augment_pipe)]:
         if (num_devices > 1) and (module is not None) and len(list(module.parameters())) != 0:
@@ -236,13 +236,17 @@ def training_loop(
             # if num_tpus is not None:
             #     module = torch_xla.distributed.parallel_loader.ParallelLoader(torch.nn.parallel.DistributedDataParallel(module, device_ids=[device], broadcast_buffers=False))
             # else:
-            module = torch.nn.parallel.DistributedDataParallel(module, device_ids=[device], broadcast_buffers=False)
+            if num_tpus is not None:
+                torch.distributed.init_process_group("gloo", rank=xm.get_ordinal(), world_size=xm.xrt_world_size())
+                module = torch.nn.parallel.DistributedDataParallel(module, device_ids=[device], broadcast_buffers=False)
+            else:
+                module = torch.nn.parallel.DistributedDataParallel(module, device_ids=[device], broadcast_buffers=False)
             module.requires_grad_(False)
         if name is not None:
             ddp_modules[name] = module
 
     # Setup training phases.
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0:
         print('Setting up training phases...')
     loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
     phases = []
@@ -269,7 +273,7 @@ def training_loop(
     grid_size = None
     grid_z = None
     grid_c = None
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0:
         print('Exporting sample images...')
         grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
         save_image_grid(images, os.path.join(run_dir, 'reals.jpg'), drange=[0,255], grid_size=grid_size)
@@ -279,7 +283,7 @@ def training_loop(
         save_image_grid(images, os.path.join(run_dir, 'fakes_init.jpg'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0:
         print('Initializing logs...')
     stats_collector = training_stats.Collector(regex='.*')
     stats_metrics = dict()
@@ -294,7 +298,7 @@ def training_loop(
             print('Skipping tfevents export:', err)
 
     # Train.
-    if rank == 0 or xm.is_master_ordinal():
+    if rank == 0:
         print(f'Training for {total_kimg} kimg...')
         print()
     cur_nimg = nimg
