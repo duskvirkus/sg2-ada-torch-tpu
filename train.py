@@ -32,6 +32,7 @@ class UserError(Exception):
 def setup_training_loop_kwargs(
     # General options (not included in desc).
     gpus       = None, # Number of GPUs: <int>, default = 1 gpu
+    tpu        = None, # Use tpu instead of gpu
     snap       = None, # Snapshot interval: <int>, default = 50 ticks
     metrics    = None, # List of metric names: [], ['fid50k_full'] (default), ...
     seed       = None, # Random seed: <int>, default = 0
@@ -75,12 +76,16 @@ def setup_training_loop_kwargs(
     # General options: gpus, snap, metrics, seed
     # ------------------------------------------
 
-    if gpus is None:
-        gpus = 1
-    assert isinstance(gpus, int)
-    if not (gpus >= 1 and gpus & (gpus - 1) == 0):
-        raise UserError('--gpus must be a power of two')
-    args.num_gpus = gpus
+    if tpu:
+        args.tpu = True
+    else:
+        if gpus is None:
+            gpus = 1
+        assert isinstance(gpus, int)
+        if not (gpus >= 1 and gpus & (gpus - 1) == 0):
+            raise UserError('--gpus must be a power of two')
+        args.num_gpus = gpus
+
 
     if snap is None:
         snap = 50
@@ -102,6 +107,7 @@ def setup_training_loop_kwargs(
     assert isinstance(seed, int)
     args.random_seed = seed
 
+
     # -----------------------------------
     # Dataset: data, cond, subset, mirror
     # -----------------------------------
@@ -118,7 +124,7 @@ def setup_training_loop_kwargs(
         desc = training_set.name
         del training_set # conserve memory
     except IOError as err:
-        raise UserError(f'--data: {err}')
+        raise UserError('--data: %s' % err)
 
     if cond is None:
         cond = False
@@ -133,8 +139,8 @@ def setup_training_loop_kwargs(
     if subset is not None:
         assert isinstance(subset, int)
         if not 1 <= subset <= args.training_set_kwargs.max_size:
-            raise UserError(f'--subset must be between 1 and {args.training_set_kwargs.max_size}')
-        desc += f'-subset{subset}'
+            raise UserError('--subset must be between 1 and %d' % (args.training_set_kwargs.max_size))
+        desc += '-subset%s' % subset
         if subset < args.training_set_kwargs.max_size:
             args.training_set_kwargs.max_size = subset
             args.training_set_kwargs.random_seed = args.random_seed
@@ -160,7 +166,7 @@ def setup_training_loop_kwargs(
     if cfg is None:
         cfg = 'auto'
     assert isinstance(cfg, str)
-    desc += f'-{cfg}'
+    desc += '-%s' % cfg
 
     cfg_specs = {
         'auto':          dict(ref_gpus=-1, kimg=25000,  mb=-1, mbstd=-1, fmaps=-1,  lrate=-1,     gamma=-1,   ema=-1,  ramp=0.05, map=2), # populated dynamically based on 'gpus' and 'res'
@@ -183,7 +189,7 @@ def setup_training_loop_kwargs(
     assert cfg in cfg_specs
     spec = dnnlib.EasyDict(cfg_specs[cfg])
     if cfg == 'auto':
-        desc += f'{gpus:d}'
+        desc += '%d' % (gpus)
         spec.ref_gpus = gpus
         res = args.training_set_kwargs.resolution
         spec.mb = max(min(gpus * min(4096 // res, 32), 64), gpus) # keep gpu memory consumption at bay
@@ -225,7 +231,7 @@ def setup_training_loop_kwargs(
         assert isinstance(gamma, float)
         if not gamma >= 0:
             raise UserError('--gamma must be non-negative')
-        desc += f'-gamma{gamma:g}'
+        desc += '-gamma%g' % gamma
         args.loss_kwargs.r1_gamma = gamma
 
     if nkimg is not None:
@@ -236,14 +242,14 @@ def setup_training_loop_kwargs(
         assert isinstance(kimg, int)
         if not kimg >= 1:
             raise UserError('--kimg must be at least 1')
-        desc += f'-kimg{kimg:d}'
+        desc += '-kimg%d' % kimg
         args.total_kimg = kimg
 
     if batch is not None:
         assert isinstance(batch, int)
         if not (batch >= 1 and batch % gpus == 0):
             raise UserError('--batch must be at least 1 and divisible by --gpus')
-        desc += f'-batch{batch}'
+        desc += '-batch%d' % batch
         args.batch_size = batch
         args.batch_gpu = batch // gpus
 
@@ -255,7 +261,7 @@ def setup_training_loop_kwargs(
         aug = 'ada'
     else:
         assert isinstance(aug, str)
-        desc += f'-{aug}'
+        desc += '-%s' % aug
 
     if aug == 'ada':
         args.ada_target = 0.6
@@ -265,10 +271,10 @@ def setup_training_loop_kwargs(
 
     elif aug == 'fixed':
         if p is None:
-            raise UserError(f'--aug={aug} requires specifying --p')
+            raise UserError('--aug=%s requires specifying --p' % aug)
 
     else:
-        raise UserError(f'--aug={aug} not supported')
+        raise UserError('--aug=%s not supported' % aug)
 
     if p is not None:
         assert isinstance(p, float)
@@ -276,7 +282,7 @@ def setup_training_loop_kwargs(
             raise UserError('--p can only be specified with --aug=fixed')
         if not 0 <= p <= 1:
             raise UserError('--p must be between 0 and 1')
-        desc += f'-p{p:g}'
+        desc += '-p%g' % p
         args.augment_p = p
 
     if target is not None:
@@ -285,7 +291,7 @@ def setup_training_loop_kwargs(
             raise UserError('--target can only be specified with --aug=ada')
         if not 0 <= target <= 1:
             raise UserError('--target must be between 0 and 1')
-        desc += f'-target{target:g}'
+        desc += '-target%s' % target
         args.ada_target = target
 
     if initstrength is not None:
@@ -298,7 +304,7 @@ def setup_training_loop_kwargs(
     else:
         if aug == 'noaug':
             raise UserError('--augpipe cannot be specified with --aug=noaug')
-        desc += f'-{augpipe}'
+        desc += '-%s' % augpipe
 
     augpipe_specs = {
         'blit':   dict(xflip=1, rotate90=1, xint=1),
@@ -336,7 +342,7 @@ def setup_training_loop_kwargs(
     elif resume == 'noresume':
         desc += '-noresume'
     elif resume in resume_specs:
-        desc += f'-resume{resume}'
+        desc += '-resume%s' % resume
         args.resume_pkl = resume_specs[resume] # predefined url
     else:
         desc += '-resumecustom'
@@ -350,7 +356,7 @@ def setup_training_loop_kwargs(
         assert isinstance(freezed, int)
         if not freezed >= 0:
             raise UserError('--freezed must be non-negative')
-        desc += f'-freezed{freezed:d}'
+        desc += '-freezed%d' % freezed
         args.D_kwargs.block_kwargs.freeze_layers = freezed
 
     # -------------------------------------------------
@@ -396,20 +402,23 @@ def subprocess_fn(rank, args, temp_dir):
     dnnlib.util.Logger(file_name=os.path.join(args.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
     # Init torch.distributed.
-    if args.num_gpus > 1:
-        init_file = os.path.abspath(os.path.join(temp_dir, '.torch_distributed_init'))
-        if os.name == 'nt':
-            init_method = 'file:///' + init_file.replace('\\', '/')
-            torch.distributed.init_process_group(backend='gloo', init_method=init_method, rank=rank, world_size=args.num_gpus)
-        else:
-            init_method = f'file://{init_file}'
-            torch.distributed.init_process_group(backend='nccl', init_method=init_method, rank=rank, world_size=args.num_gpus)
+    if args.tpu:
+        pass
+    else:
+        if args.num_gpus > 1:
+            init_file = os.path.abspath(os.path.join(temp_dir, '.torch_distributed_init'))
+            if os.name == 'nt':
+                init_method = 'file:///' + init_file.replace('\\', '/')
+                torch.distributed.init_process_group(backend='gloo', init_method=init_method, rank=rank, world_size=args.num_gpus)
+            else:
+                init_method = 'file://{a}'.format(a=init_file)
+                torch.distributed.init_process_group(backend='nccl', init_method=init_method, rank=rank, world_size=args.num_gpus)
 
-    # Init torch_utils.
-    sync_device = torch.device('cuda', rank) if args.num_gpus > 1 else None
-    training_stats.init_multiprocessing(rank=rank, sync_device=sync_device)
-    if rank != 0:
-        custom_ops.verbosity = 'none'
+        # Init torch_utils.
+        sync_device = torch.device('cuda', rank) if args.num_gpus > 1 else None
+        training_stats.init_multiprocessing(rank=rank, sync_device=sync_device)
+        if rank != 0:
+            custom_ops.verbosity = 'none'
 
     # Execute training loop.
     training_loop.training_loop(rank=rank, **args)
@@ -433,6 +442,7 @@ class CommaSeparatedList(click.ParamType):
 # General options.
 @click.option('--outdir', help='Where to save the results', required=True, metavar='DIR')
 @click.option('--gpus', help='Number of GPUs to use [default: 1]', type=int, metavar='INT')
+@click.option('--tpu', help='Use TPUs instead of GPUs.', type=bool, metavar='BOOL')
 @click.option('--snap', help='Snapshot interval [default: 50 ticks]', type=int, metavar='INT')
 @click.option('--metrics', help='Comma-separated list or "none" [default: fid50k_full]', type=CommaSeparatedList())
 @click.option('--seed', help='Random seed [default: 0]', type=int, metavar='INT')
@@ -530,7 +540,7 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
     prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
     cur_run_id = max(prev_run_ids, default=-1) + 1
-    args.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{run_desc}')
+    args.run_dir = os.path.join(outdir, '%05d-%s' % (cur_run_id, run_desc))
     assert not os.path.exists(args.run_dir)
 
     # Print options.
@@ -538,14 +548,16 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     print('Training options:')
     print(json.dumps(args, indent=2))
     print()
-    print(f'Output directory:   {args.run_dir}')
-    print(f'Training data:      {args.training_set_kwargs.path}')
-    print(f'Training duration:  {args.total_kimg} kimg')
-    print(f'Number of GPUs:     {args.num_gpus}')
-    print(f'Number of images:   {args.training_set_kwargs.max_size}')
-    print(f'Image resolution:   {args.training_set_kwargs.resolution}')
-    print(f'Conditional model:  {args.training_set_kwargs.use_labels}')
-    print(f'Dataset x-flips:    {args.training_set_kwargs.xflip}')
+    print('Output directory:   %s' % arg.run_dir)
+    print('Training data:      %s' % args.training_set_kwargs.path)
+    print('Training duration:  %d kimgs' % args.total_kimg)
+    print('TPU Flag:           %b' % args.tpu)
+    if not args.tpu:
+        print('Number of GPUs:     %d' % args.num_gpus)
+    print('Number of images:   %d' % args.training_set_kwargs.max_size)
+    print('Image resolution:   %d' % args.training_set_kwargs.resolution)
+    print('Conditional model:  %s' % args.training_set_kwargs.use_labels)
+    print('Dataset x-flips:    %b' % args.training_set_kwargs.xflip)
     print()
 
     # Dry run?
@@ -561,12 +573,15 @@ def main(ctx, outdir, dry_run, **config_kwargs):
 
     # Launch processes.
     print('Launching processes...')
-    torch.multiprocessing.set_start_method('spawn')
     with tempfile.TemporaryDirectory() as temp_dir:
-        if args.num_gpus == 1:
-            subprocess_fn(rank=0, args=args, temp_dir=temp_dir)
+        if tpu:
+            pass
         else:
-            torch.multiprocessing.spawn(fn=subprocess_fn, args=(args, temp_dir), nprocs=args.num_gpus)
+            torch.multiprocessing.set_start_method('spawn')
+            if args.num_gpus == 1:
+                subprocess_fn(rank=0, args=args, temp_dir=temp_dir)
+            else:
+                torch.multiprocessing.spawn(fn=subprocess_fn, args=(args, temp_dir), nprocs=args.num_gpus)
 
 #----------------------------------------------------------------------------
 
