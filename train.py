@@ -16,6 +16,8 @@ import json
 import tempfile
 import torch
 import dnnlib
+import numpy as np
+import torch_xla.distributed.xla_multiprocessing as xmp
 
 from training import training_loop
 from metrics import metric_main
@@ -32,7 +34,7 @@ class UserError(Exception):
 def setup_training_loop_kwargs(
     # General options (not included in desc).
     gpus       = None, # Number of GPUs: <int>, default = 1 gpu
-    tpu        = None, # Use tpu instead of gpu
+    tpus       = None, # Use tpu instead of gpu
     snap       = None, # Snapshot interval: <int>, default = 50 ticks
     metrics    = None, # List of metric names: [], ['fid50k_full'] (default), ...
     seed       = None, # Random seed: <int>, default = 0
@@ -76,9 +78,13 @@ def setup_training_loop_kwargs(
     # General options: gpus, snap, metrics, seed
     # ------------------------------------------
 
-    if tpu:
-        args.tpu = True
+    if tpus is not None:
+        assert isinstance(tpus, int)
+        if not (tpus >= 1 and tpus & (tpus - 1) == 0):
+            raise UserError('--tpus must be a power of two')
+        args.num_tpus = tpus
     else:
+        args.num_tpus = None
         if gpus is None:
             gpus = 1
         assert isinstance(gpus, int)
@@ -402,7 +408,7 @@ def subprocess_fn(rank, args, temp_dir):
     dnnlib.util.Logger(file_name=os.path.join(args.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
     # Init torch.distributed.
-    if args.tpu:
+    if args.num_tpus is not None:
         pass
     else:
         if args.num_gpus > 1:
@@ -442,7 +448,7 @@ class CommaSeparatedList(click.ParamType):
 # General options.
 @click.option('--outdir', help='Where to save the results', required=True, metavar='DIR')
 @click.option('--gpus', help='Number of GPUs to use [default: 1]', type=int, metavar='INT')
-@click.option('--tpu', help='Use TPUs instead of GPUs.', type=bool, metavar='BOOL')
+@click.option('--tpus', help='Number of TPUs to use. Incompatable with gpu useage. --gpus will be ignored if this arugment is passed. [default: None]', type=int, metavar='INT')
 @click.option('--snap', help='Snapshot interval [default: 50 ticks]', type=int, metavar='INT')
 @click.option('--metrics', help='Comma-separated list or "none" [default: fid50k_full]', type=CommaSeparatedList())
 @click.option('--seed', help='Random seed [default: 0]', type=int, metavar='INT')
@@ -548,16 +554,17 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     print('Training options:')
     print(json.dumps(args, indent=2))
     print()
-    print('Output directory:   %s' % arg.run_dir)
+    print('Output directory:   %s' % args.run_dir)
     print('Training data:      %s' % args.training_set_kwargs.path)
     print('Training duration:  %d kimgs' % args.total_kimg)
-    print('TPU Flag:           %b' % args.tpu)
-    if not args.tpu:
+    if args.num_tpus is not None:
+        print('Number of TPUs:     %d' % args.num_tpus)
+    else:
         print('Number of GPUs:     %d' % args.num_gpus)
     print('Number of images:   %d' % args.training_set_kwargs.max_size)
     print('Image resolution:   %d' % args.training_set_kwargs.resolution)
     print('Conditional model:  %s' % args.training_set_kwargs.use_labels)
-    print('Dataset x-flips:    %b' % args.training_set_kwargs.xflip)
+    print('Dataset x-flips:    %s' % args.training_set_kwargs.xflip)
     print()
 
     # Dry run?
@@ -574,8 +581,9 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     # Launch processes.
     print('Launching processes...')
     with tempfile.TemporaryDirectory() as temp_dir:
-        if tpu:
-            pass
+        if args.num_tpus is not None:
+            args['tpu_seed'] = np.randint(0, 100000, dtype='int')
+            xmp.spawn(subprocess_fn, args=(args, temp_dir), nprocs=args.num_tpus, start_method='fork')
         else:
             torch.multiprocessing.set_start_method('spawn')
             if args.num_gpus == 1:
